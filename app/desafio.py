@@ -1,6 +1,51 @@
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
+from pathlib import Path
 import textwrap, platform, os
+
+ROOT_PATH = Path(__file__).parent
+
+def gravar_no_arquivo(caminho, conteudo):
+    try:
+        with open(ROOT_PATH / caminho, 'a', encoding='utf-8') as arquivo:
+                arquivo.write(f"\n{conteudo}")
+    except IOError as exc:
+        print(f"Erro de gravação: {exc}")
+
+        try:
+            erro_conteudo = (
+                f"\n[ERRO] Falha ao gravar em {caminho}\n"
+                f"Motivo: {exc}\n"
+                f"Conteúdo original: {conteudo}\n"
+            )
+
+            with open(ROOT_PATH / 'erro_log.txt', 'a', encoding='utf-8') as erro_arquivo:
+                erro_arquivo.write(erro_conteudo)
+        except Exception as fallback_exc:
+            print(f"Falha ao registrar o erro em erro_log.txt: {fallback_exc}")
+
+
+def log_transacao(func):
+    def wrapper(*args, **kwargs):
+        try:
+            resultado = func(*args, **kwargs)
+        except Exception as e:
+            resultado = {"sucesso": False, "_log_extra": f"Exceção: {str(e)}"}
+
+        tipo = func.__name__.replace("_", " ").capitalize()
+        data_hora = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+
+        extras = ""
+        if isinstance(resultado, dict) and "_log_extra" in resultado:
+            extras = resultado["_log_extra"]
+
+        conteudo = f"[{data_hora}] - {tipo} executada com os argumentos {args} {kwargs}. {extras} Retornou {resultado}"
+        
+        gravar_no_arquivo('log.txt', conteudo)
+     
+        return resultado
+    
+    return wrapper
 
 
 class ContaIterador:
@@ -25,12 +70,15 @@ class Cliente:
         self.endereco = endereco
         self.contas = []
 
+    @log_transacao
     def realizar_transacao(self, conta, transacao):
-        if len(conta.historico.transacoes_do_dia()) >= 10:
+        qtd_transacoes_do_dia = len(conta.historico.transacoes_do_dia())
+        if qtd_transacoes_do_dia >= 10:
             print("\n<<< Você excedeu o número de transações permitidas para hoje! >>>")
-            return
+            return {"sucesso": False, "_log_extra": f"Número de transações de {qtd_transacoes_do_dia} excedida para hoje"}
         
-        transacao.registrar(conta)
+        resultado = transacao.registrar(conta)
+        return resultado
     
 
     def adicionar_conta(self, conta):
@@ -43,6 +91,9 @@ class PessoaFisica(Cliente):
         self.nome = nome
         self.data_nascimento = data_nascimento
         self.cpf = cpf
+    
+    def __repr__(self):
+        return f"<{self.__class__.__name__}: ('{self.cpf}')>"
     
     def __str__(self):
         return f"""
@@ -84,34 +135,33 @@ class Conta:
     def historico(self):
         return self._historico
     
-
+ 
     def sacar(self, valor):
         saldo = self._saldo
         excedeu_saldo = valor > saldo
 
         if excedeu_saldo:
             print("\n<<< Operação falhou! Você não tem saldo suficiente. >>>")
-        
+            return {"sucesso": False, "_log_extra": "Erro: Saldo insuficiente."}
         elif valor > 0:
             self._saldo -= valor
             print("\nSaque realizado com sucesso!")
-            return True
+            return {"sucesso": True, "_log_extra": f"Saque realizado: R$ {valor:.2f}."}
         
         else:
             print("\n<<< Operação falhou! O valor informado é inválido. >>>")
+            return {"sucesso": False, "_log_extra": "Valor informado inválido."}
         
-        return False
-    
-    
+    @log_transacao
     def depositar(self, valor):
         if valor > 0:
             self._saldo += valor
             print("\nDepósito realizado com sucesso!")
+            return {"sucesso": True, "_log_extra": f"Depósito realizado: R$ {valor:.2f}."}
         else:
             print("\n<<< Operação falhou! O valor informado é inválido. >>>")
-            return False
+            return {"sucesso": False, "_log_extra": "Valor informado inválido."}
         
-        return True
 
 
 class ContaCorrente(Conta):
@@ -120,6 +170,7 @@ class ContaCorrente(Conta):
         self.limite = limite
         self.limite_saques = limite_saques
 
+    @log_transacao
     def sacar(self, valor):
         numero_saques = len(
             [transacao for transacao in self.historico.transacoes if transacao["tipo"] == Saque.__name__]
@@ -130,13 +181,19 @@ class ContaCorrente(Conta):
 
         if excedeu_limite:
             print("\n<<< Operação falhou! O valor do saque excede o limite. >>>")
+            return {"sucesso": False, "_log_extra": f"Saque de valor R$ {valor:.2f} falhou: excede limite de R$ {self.limite:.2f}."}
         elif excedeu_saques:
             print("\n<<< Operação falhou! Número máximo de saques excedido. >>>")
-        else:
-            return super().sacar(valor)
+            return {"sucesso": False, "_log_extra": f"Saque de valor R$ {valor:.2f} falhou: excedeu limite de {self.limite_saques:.2f} saques."}
+       
+        resultado = super().sacar(valor)
+        return resultado
         
-        return False
     
+    
+    def __repr__(self):
+        return f"<{self.__class__.__name__}: ('{self.agencia}', '{self.numero}', '{self.cliente.nome}')>"
+
     def __str__(self):
         return f"""
             Agência:\t{self.agencia}
@@ -201,10 +258,13 @@ class Saque(Transacao):
     
 
     def registrar(self, conta):
-        sucesso_transacao = conta.sacar(self.valor)
+        resultado = conta.sacar(self.valor)
 
-        if sucesso_transacao:
+        if resultado.get("sucesso"):
             conta.historico.adicionar_transacao(self)
+    
+    def __repr__(self):
+        return f"<Saque: R$ {self.valor:.2f}>"
 
 
 class Deposito(Transacao):
@@ -216,22 +276,13 @@ class Deposito(Transacao):
         return self._valor
     
     def registrar(self, conta):
-        sucesso_transacao = conta.depositar(self.valor)
+        resultado = conta.depositar(self.valor)
 
-        if sucesso_transacao:
+        if resultado.get("sucesso"):
             conta.historico.adicionar_transacao(self)
 
-
-def log_transacao(func):
-    def wrapper(*args, **kwargs):
-        resultado = func(*args, **kwargs)
-
-        tipo = func.__name__.replace("_", " ").capitalize()
-        data_hora = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        print(f"\nLOG {tipo} realizado em {data_hora}")
-
-        return resultado
-    return wrapper
+    def __repr__(self):
+        return f"<Deposito: R$ {self.valor:.2f}>"
 
 
 def menu():
@@ -249,38 +300,42 @@ def menu():
     return input(textwrap.dedent(menu))
 
 
-@log_transacao
+
 def depositar(clientes):
     cliente, conta = obter_cliente_e_conta(clientes)
 
     if not cliente or not conta:
-        return
+        return {"sucesso": False, "_log_extra": "Erro: cliente ou conta não encontrados."}
     
     try:
         valor = float(input("Informe o valor do depósito: "))
     except ValueError:
         print("<<< Valor inválido. >>>")
-        return
+        return {"sucesso": False ,"_log_extra": "Erro: valor de depósito inválido."}
     
     transacao = Deposito(valor)
-    cliente.realizar_transacao(conta, transacao)
+    resultado = cliente.realizar_transacao(conta, transacao)
+
+    return resultado
 
 
-@log_transacao
 def sacar(clientes): 
     cliente, conta = obter_cliente_e_conta(clientes)
 
     if not cliente or not conta:
-        return
+        return {"sucesso": False, "_log_extra": "Erro: cliente ou conta não encontrados."}
     
     try:
         valor = float(input("Informe o valor do saque: "))
     except ValueError:
         print("<<< Valor inválido. >>>")
-        return
+        return {"sucesso": False, "_log_extra": "Erro: valor de saque inválido."}
+    
     
     transacao = Saque(valor)
-    cliente.realizar_transacao(conta, transacao)
+    resultado = cliente.realizar_transacao(conta, transacao)
+
+    return resultado
 
 
 @log_transacao
@@ -288,7 +343,7 @@ def exibir_extrato(clientes):
     cliente, conta = obter_cliente_e_conta(clientes)
 
     if not cliente or not conta:
-        return
+        return {"sucesso": False, "_log_extra": "Erro: cliente ou conta não encontrados."}
     
     print()
     print(" EXTRATO ".center(40, '='))
@@ -309,12 +364,13 @@ def exibir_extrato(clientes):
     print('=' * 40)
 
 
+
 @log_transacao
 def criar_conta(numero_conta, clientes, contas):
     cliente = obter_cliente(clientes)
     
     if not cliente:
-        return
+        return {"sucesso": False, "_log_extra": "Erro: cliente não encontrado."}
     
     conta = ContaCorrente.nova_conta(cliente=cliente, numero=numero_conta)
     cliente.adicionar_conta(conta)
@@ -341,7 +397,7 @@ def criar_cliente(clientes):
 
     if cliente:
         print("\n<<< Já existe cliente com este CPF! >>>")
-        return
+        return {"sucesso": False, "_log_extra": f"Erro: cliente com CPF {cpf} já existe."}
     
     nome = input("Informe o nome completo: ")
     data_nascimento = input("Informe a data de nascimento (dd-mm-aaaa): ")
@@ -436,16 +492,25 @@ def main():
     clientes = []
     contas = []
 
+
     while True:
         limpar_tela()
         opcao = menu()
 
         if opcao == "d":
-            depositar(clientes)
+            resultado = depositar(clientes)
+            if resultado and not resultado["sucesso"]:
+                data_atual = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+                conteudo = f"[{data_atual}] - Depósito falhou. {resultado}"
+                gravar_no_arquivo('log.txt', conteudo)
             pausar()
 
         elif opcao == "s":
-            sacar(clientes)
+            resultado = sacar(clientes)
+            if resultado and not resultado["sucesso"]:
+                data_atual = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+                conteudo = f"[{data_atual}] - Saque falhou. {resultado}"
+                gravar_no_arquivo('log.txt', conteudo)
             pausar()
 
         elif opcao == "e":

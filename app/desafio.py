@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from pathlib import Path
 import textwrap, platform, os
+from persistencia import carregar_json_de_arquivo, salvar_cliente_individual, atualizar_conta
 
 ROOT_PATH = Path(__file__).parent
 
@@ -262,6 +263,8 @@ class Saque(Transacao):
 
         if resultado.get("sucesso"):
             conta.historico.adicionar_transacao(self)
+        
+        return resultado
     
     def __repr__(self):
         return f"<Saque: R$ {self.valor:.2f}>"
@@ -277,9 +280,11 @@ class Deposito(Transacao):
     
     def registrar(self, conta):
         resultado = conta.depositar(self.valor)
-
+       
         if resultado.get("sucesso"):
             conta.historico.adicionar_transacao(self)
+
+        return resultado
 
     def __repr__(self):
         return f"<Deposito: R$ {self.valor:.2f}>"
@@ -316,6 +321,9 @@ def depositar(clientes):
     transacao = Deposito(valor)
     resultado = cliente.realizar_transacao(conta, transacao)
 
+    if resultado.get("sucesso"):
+        atualizar_conta(conta)
+
     return resultado
 
 
@@ -334,6 +342,9 @@ def sacar(clientes):
     
     transacao = Saque(valor)
     resultado = cliente.realizar_transacao(conta, transacao)
+
+    if resultado.get("sucesso"):
+        atualizar_conta(conta)
 
     return resultado
 
@@ -376,6 +387,7 @@ def criar_conta(numero_conta, clientes, contas):
     cliente.adicionar_conta(conta)
     contas.append(conta)
 
+    atualizar_conta(conta)
     print("\nConta criada com sucesso!")
     
 
@@ -406,6 +418,7 @@ def criar_cliente(clientes):
     cliente = PessoaFisica(nome=nome, data_nascimento=data_nascimento, cpf=cpf, endereco=endereco)
 
     clientes.append(cliente)
+    salvar_cliente_individual(cliente)
     print("\nCliente criado com sucesso!")
 
 
@@ -489,8 +502,40 @@ def pausar():
 
 
 def main():
+
     clientes = []
     contas = []
+
+    # Carregar clientes
+    clientes_dados = carregar_json_de_arquivo('clientes.txt')
+    
+    for dado in clientes_dados:
+        cliente = PessoaFisica(**dado)
+        clientes.append(cliente)
+    
+    # Carregar contas
+    contas_dados = carregar_json_de_arquivo('contas.txt')
+
+    for dado in contas_dados:
+        cliente = filtrar_cliente(dado["cpf_cliente"], clientes)
+        if cliente:
+            conta = ContaCorrente(
+                numero=dado["numero"],
+                cliente=cliente,
+                limite=dado["limite"],
+                limite_saques=dado["limite_saques"]
+            )
+
+            conta._saldo = dado["saldo"]
+            for transacao in dado["historico"]:
+                if transacao["tipo"] == "Deposito":
+                    t = Deposito(transacao["valor"])
+                else:
+                    t = Saque(transacao["valor"])
+                
+                conta.historico.adicionar_transacao(t)
+            cliente.adicionar_conta(conta)
+            contas.append(conta)
 
 
     while True:
